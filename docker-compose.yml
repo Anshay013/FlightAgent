@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  # === Redis cache ===
+  redis:
+    image: redis:7.4
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - flightnet
+
+  # === LangChain Orchestrator ===
+  orchestrator:
+    build: ./orchestrator
+    container_name: orchestrator
+    ports:
+      - "8081:8081"
+    env_file:
+      - ./orchestrator/.env
+    depends_on:
+      - redis
+    networks:
+      - flightnet
+
+  # === Spring Boot MCP instances ===
+  mcp1:
+    build: ./mcp
+    container_name: mcp1
+    environment:
+      - SERVER_PORT=8080
+      - SPRING_PROFILES_ACTIVE=default
+    depends_on:
+      - redis
+    networks:
+      - flightnet
+    ports:
+      - "8080:8080"
+
+  mcp2:
+    build: ./mcp
+    container_name: mcp2
+    environment:
+      - SERVER_PORT=8082
+    depends_on:
+      - redis
+    networks:
+      - flightnet
+    ports:
+      - "8082:8082"
+
+  mcp3:
+    build: ./mcp
+    container_name: mcp3
+    environment:
+      - SERVER_PORT=8083
+    depends_on:
+      - redis
+    networks:
+      - flightnet
+    ports:
+      - "8083:8083"
+
+networks:
+  flightnet:
+    driver: bridge
