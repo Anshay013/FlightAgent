@@ -19,5 +19,6 @@ public class FlightResult {
     private int stops;
     private double price;
     private String currency;
+    private String cabinClass = "Economy";
 }
 

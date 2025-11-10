@@ -82,7 +82,7 @@ public class FlightService {
                 break;
 
             case "earliest":
-                results.sort(Comparator.comparing(FlightResult::getDepartureTime, Comparator.nullsLast(String::compareTo)));
+                results.sort(Comparator.comparing(FlightResult::getDepartureTime));
                 break;
 
             case "direct":

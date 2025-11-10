@@ -21,5 +21,6 @@ public class FlightQuery {
     private Double maxPrice;
     private String intent = "cheapest";
     private String region; // optional
+    private String airline;
 
 }

@@ -17,9 +17,7 @@ from tools.base_tool import call_mcp_search
 from redis_memory import append_message, get_history
 from intent_parser import parse_user_query
 
-# Load env vars
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY", "")
+
 
 # --- Optional tracing ---
 from opentelemetry import trace
@@ -29,8 +27,35 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from tools.mcp_tool import aggregate_flight_search_tool
+from langchain.agents import initialize_agent, AgentType
+from langchain_openai import ChatOpenAI
 
 
+
+
+# Load env vars
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY", "")
+
+
+# Initialize the LLM (GPT model)
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.3,
+    openai_api_key=openai.api_key
+)
+
+# Register available tools
+tools = [aggregate_flight_search_tool]
+
+# Create the LangChain agent
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
 
 
 
@@ -157,129 +182,210 @@ def merge_and_dedupe_results(all_results: List[Dict[str, Any]]) -> List[Dict[str
 
 
 
+
+
+
 # 🧩 1. Intent-aware natural language endpoint
+# @app.post("/agent/query")
+# async def handle_text_query(payload: Dict[str, Any], session_id: Optional[str] = Query(None)):
+#     """
+#     Multi-region flow:
+#     - If payload.device contains 'regions': a list of region dicts or region codes, we will query MCP per region.
+#       Example device.regions: [{"country":"AE","currency":"AED"},{"country":"IN","currency":"INR"}]
+#     - Otherwise will use IP detection for a single region and call MCP once.
+#     - Aggregates results, dedupes, optionally normalizes prices (if EXCHANGE_RATES provided).
+#     """
+#     try:
+#         text = payload.get("query", "")
+#         if not text:
+#             raise OrchestratorException("Query text cannot be empty", code="EMPTY_QUERY", status_code=400)
+
+#         device = payload.get("device", {}) or {}
+#         ip_address = payload.get("ip", None)
+
+#         # parse user intent -> base query dict
+#         parsed = parse_user_query(text)
+
+#         # Decide target regions list (list of dicts with at least currency & country)
+#         regions_input = device.get("regions")
+#         regions: List[Dict[str, Any]] = []
+
+#         if regions_input:
+#             # normalize different possible region inputs
+#             for x in regions_input:
+#                 if isinstance(x, str):
+#                     # simple code like "IN" or "AE" -> default currency mapping (can be extended)
+#                     regions.append({"country": x, "currency": None, "region": x})
+#                 elif isinstance(x, dict):
+#                     regions.append({"country": x.get("country") or x.get("region"),
+#                                     "currency": x.get("currency"),
+#                                     "region": x.get("region") or x.get("country")})
+#         else:
+#             # single region detection via device or IP
+#             if device.get("country") or device.get("currency"):
+#                 regions.append({"country": device.get("country"), "currency": device.get("currency"), "region": device.get("region")})
+#             else:
+#                 regions.append(detect_region_from_ip(ip_address))
+
+#         # For each region, build a query copy with currency set and call MCP
+#         aggregated_results = []
+#         for reg in regions:
+#             # determine currency precedence: user text override > region currency > parsed currency > default IN
+#             currency_override = detect_currency_from_text(text)
+#             currency = currency_override or reg.get("currency") or parsed.get("currency") or "INR"
+
+#             # build FlightQuery payload
+#             fq_payload = dict(parsed)  # shallow copy
+#             fq_payload["currency"] = currency
+
+#             # ensure required fields exist (origin/destination must be present from parsed or we raise)
+#             if not fq_payload.get("origin") or not fq_payload.get("destination"):
+#                 raise OrchestratorException("origin/destination missing in parsed query", code="INVALID_QUERY", status_code=400)
+
+#             # call MCP
+#             logger.info("Calling MCP for region %s with currency %s", reg.get("region"), currency)
+#             try:
+#                 results = call_mcp_search(fq_payload)
+#             except Exception as e:
+#                 logger.warning("MCP call failed for region %s: %s", reg.get("region"), e)
+#                 results = []
+
+#             # tag each result with region
+#             for r in results:
+#                 r["region_source"] = reg.get("region") or reg.get("country") or "unknown"
+#                 aggregated_results.append(r)
+
+#         # Merge & dedupe
+#         merged = merge_and_dedupe_results(aggregated_results)
+
+#         # Optionally normalize prices to user's preferred currency (if env var USER_DISPLAY_CURRENCY set)
+#         display_currency = parsed.get("currency") or os.getenv("USER_DISPLAY_CURRENCY")
+#         if display_currency:
+#             for r in merged:
+#                 try:
+#                     normalized = normalize_price(r.get("price", 0.0), r.get("currency", ""), display_currency)
+#                     if normalized is not None:
+#                         r["_price_normalized"] = round(normalized, 2)
+#                         r["_display_currency"] = display_currency
+#                 except Exception:
+#                     pass
+
+#             # sort by normalized price if available else raw price
+#             merged.sort(key=lambda x: x.get("_price_normalized", x.get("price", float('inf'))))
+#         else:
+#             merged.sort(key=lambda x: x.get("price", float('inf')))
+
+#         # Summarize (we pass merged results)
+#         summary_prompt = (
+#             f"User asked: '{text}'\n"
+#             f"Regions queried: {[r.get('region_source') for r in merged]}\n"
+#             f"Aggregated flight results: {json.dumps(merged)[:5000]}\n"  # truncate large payload for prompt safety
+#             f"Summarize top {parsed.get('limit', 10)} flights and mention region & currency."
+#         )
+#         summary = call_openai_sync(summary_prompt)
+
+#         # session persistence
+#         if session_id:
+#             append_message(session_id, "user", text)
+#             append_message(session_id, "assistant", summary)
+
+#         return JSONResponse({
+#             "status": "ok",
+#             "parsed_query": parsed,
+#             "regions": regions,
+#             "results": merged,
+#             "summary": summary
+#         })
+
+#     except OrchestratorException as oe:
+#         # let custom handler format it
+#         raise oe
+
+#     except Exception as e:
+#         logger.exception("Unexpected error in handle_text_query: %s", e)
+#         raise OrchestratorException(
+#             f"Unexpected error while processing query: {str(e)}",
+#             code="QUERY_PROCESSING_ERROR"
+#         )
+
+
+
 @app.post("/agent/query")
 async def handle_text_query(payload: Dict[str, Any], session_id: Optional[str] = Query(None)):
     """
-    Multi-region flow:
-    - If payload.device contains 'regions': a list of region dicts or region codes, we will query MCP per region.
-      Example device.regions: [{"country":"AE","currency":"AED"},{"country":"IN","currency":"INR"}]
-    - Otherwise will use IP detection for a single region and call MCP once.
-    - Aggregates results, dedupes, optionally normalizes prices (if EXCHANGE_RATES provided).
+    Natural language endpoint where the LLM agent autonomously decides how to use the flight search tool.
+
+    It supports natural conversations:
+      - "Find me the cheapest flights from Delhi to Dubai tomorrow"
+      - "Show flights from Mumbai to London on 12th December for 2 adults"
+      - "Now make it for 2 people instead"
+      - "Show only morning ones"
+
+    The LLM will recall prior context via Redis memory.
     """
     try:
         text = payload.get("query", "")
         if not text:
             raise OrchestratorException("Query text cannot be empty", code="EMPTY_QUERY", status_code=400)
 
-        device = payload.get("device", {}) or {}
-        ip_address = payload.get("ip", None)
+        # Load session memory if available
+        history = get_history(session_id) if session_id else []
 
-        # parse user intent -> base query dict
-        parsed = parse_user_query(text)
+        #  Construct conversation context for the LLM
+        messages = [{"role": "system", "content": (
+            "You are a helpful flight booking assistant. "
+            "You help users search and modify their flight requests using available tools like aggregate_flight_search. "
+            "Always infer user intent from conversation history."
+        )}]
 
-        # Decide target regions list (list of dicts with at least currency & country)
-        regions_input = device.get("regions")
-        regions: List[Dict[str, Any]] = []
+        for msg in history:
+            # each message is expected as {"role": "user"/"assistant", "content": "..."}
+            messages.append(msg)
 
-        if regions_input:
-            # normalize different possible region inputs
-            for x in regions_input:
-                if isinstance(x, str):
-                    # simple code like "IN" or "AE" -> default currency mapping (can be extended)
-                    regions.append({"country": x, "currency": None, "region": x})
-                elif isinstance(x, dict):
-                    regions.append({"country": x.get("country") or x.get("region"),
-                                    "currency": x.get("currency"),
-                                    "region": x.get("region") or x.get("country")})
-        else:
-            # single region detection via device or IP
-            if device.get("country") or device.get("currency"):
-                regions.append({"country": device.get("country"), "currency": device.get("currency"), "region": device.get("region")})
-            else:
-                regions.append(detect_region_from_ip(ip_address))
+        messages.append({"role": "user", "content": text})
 
-        # For each region, build a query copy with currency set and call MCP
-        aggregated_results = []
-        for reg in regions:
-            # determine currency precedence: user text override > region currency > parsed currency > default IN
-            currency_override = detect_currency_from_text(text)
-            currency = currency_override or reg.get("currency") or parsed.get("currency") or "INR"
+        logger.info(f"🧠 LLM analyzing: {text}")
+        logger.debug(f"💬 Context sent to LLM: {messages}")
 
-            # build FlightQuery payload
-            fq_payload = dict(parsed)  # shallow copy
-            fq_payload["currency"] = currency
+        #  Invoke the LangChain agent with full memory
+        llm_response = agent.invoke({"input": messages})
 
-            # ensure required fields exist (origin/destination must be present from parsed or we raise)
-            if not fq_payload.get("origin") or not fq_payload.get("destination"):
-                raise OrchestratorException("origin/destination missing in parsed query", code="INVALID_QUERY", status_code=400)
-
-            # call MCP
-            logger.info("Calling MCP for region %s with currency %s", reg.get("region"), currency)
-            try:
-                results = call_mcp_search(fq_payload)
-            except Exception as e:
-                logger.warning("MCP call failed for region %s: %s", reg.get("region"), e)
-                results = []
-
-            # tag each result with region
-            for r in results:
-                r["region_source"] = reg.get("region") or reg.get("country") or "unknown"
-                aggregated_results.append(r)
-
-        # Merge & dedupe
-        merged = merge_and_dedupe_results(aggregated_results)
-
-        # Optionally normalize prices to user's preferred currency (if env var USER_DISPLAY_CURRENCY set)
-        display_currency = parsed.get("currency") or os.getenv("USER_DISPLAY_CURRENCY")
-        if display_currency:
-            for r in merged:
-                try:
-                    normalized = normalize_price(r.get("price", 0.0), r.get("currency", ""), display_currency)
-                    if normalized is not None:
-                        r["_price_normalized"] = round(normalized, 2)
-                        r["_display_currency"] = display_currency
-                except Exception:
-                    pass
-
-            # sort by normalized price if available else raw price
-            merged.sort(key=lambda x: x.get("_price_normalized", x.get("price", float('inf'))))
-        else:
-            merged.sort(key=lambda x: x.get("price", float('inf')))
-
-        # Summarize (we pass merged results)
-        summary_prompt = (
-            f"User asked: '{text}'\n"
-            f"Regions queried: {[r.get('region_source') for r in merged]}\n"
-            f"Aggregated flight results: {json.dumps(merged)[:5000]}\n"  # truncate large payload for prompt safety
-            f"Summarize top {parsed.get('limit', 10)} flights and mention region & currency."
-        )
+        summary_prompt = f"Summarize this in 2 lines for a user interface: {llm_response}"
         summary = call_openai_sync(summary_prompt)
 
-        # session persistence
+        #  Store the new conversation turn in Redis
         if session_id:
             append_message(session_id, "user", text)
-            append_message(session_id, "assistant", summary)
+            append_message(session_id, "assistant", llm_response)
 
+        #  Return response
         return JSONResponse({
             "status": "ok",
-            "parsed_query": parsed,
-            "regions": regions,
-            "results": merged,
-            "summary": summary
+            "response": llm_response,
+            "session_id": session_id,
         })
 
     except OrchestratorException as oe:
-        # let custom handler format it
         raise oe
 
     except Exception as e:
-        logger.exception("Unexpected error in handle_text_query: %s", e)
+        logger.exception("❌ Unexpected error in handle_text_query: %s", e)
         raise OrchestratorException(
-            f"Unexpected error while processing query: {str(e)}",
-            code="QUERY_PROCESSING_ERROR"
+            message=f"Unexpected error while processing query: {str(e)}",
+            code="QUERY_PROCESSING_ERROR",
+            status_code=500
         )
 
+
+
+
+
+def append_message(session_id: str, role: str, content: str):
+    redis_client.rpush(session_id, json.dumps({"role": role, "content": content}))
+
+def get_history(session_id: str):
+    messages = redis_client.lrange(session_id, 0, -1)
+    return [json.loads(m.decode('utf-8')) for m in messages]
 
 
 
@@ -297,36 +403,47 @@ def detect_currency_from_text(text: str):
 
 
 
-
-
-
 # 🧩 2. Structured (non-stream) search
 @app.post("/agent/search")
 async def orchestrate_search(query: FlightQuery, session_id: Optional[str] = Query(None)):
+    """
+    Direct structured search endpoint — bypasses natural language flow.
+    Uses the same LangChain tool internally to call MCP.
+    """
     try:
         if session_id:
             append_message(session_id, "user", json.dumps(query.dict()))
 
-        results = call_mcp_search(query.dict())
+        # 🧩 Use the LangChain Tool instead of direct MCP call
+        results = aggregate_flight_search_tool.invoke(query.dict())
 
         if session_id:
             append_message(session_id, "assistant", json.dumps(results))
 
-        summary = call_openai_sync(f"Summarize Amadeus flight results: {results}")
+        # Summarize results with OpenAI
+        summary_prompt = f"Summarize Amadeus flight results in 2 lines for the UI: {results}"
+        summary = call_openai_sync(summary_prompt)
 
         if session_id:
             append_message(session_id, "assistant", summary)
 
-        return JSONResponse({"status": "ok", "results": results, "summary": summary})
+        return JSONResponse({
+            "status": "ok",
+            "results": results,
+            "summary": summary
+        })
 
     except OrchestratorException as oe:
         raise oe
 
     except Exception as e:
+        logger.exception("❌ Unexpected error while searching flights: %s", e)
         raise OrchestratorException(
-            f"Unexpected error while searching flights: {str(e)}",
-            code="SEARCH_ERROR"
+            message=f"Unexpected error while searching flights: {str(e)}",
+            code="SEARCH_ERROR",
+            status_code=500
         )
+
 
 
 
@@ -345,8 +462,9 @@ async def orchestrate_search_stream(query: FlightQuery, session_id: Optional[str
                 status_code=500
             )
 
-        results = call_mcp_search(query.dict())
-        prompt = f"Stream a summary for these Amadeus flight results: {results}"
+        # 🧩 Use the LangChain Tool for flight search
+        results = aggregate_flight_search_tool.invoke(query.dict())
+        prompt = f"Stream a short summary for these Amadeus flight results: {results}"
 
         async def event_generator():
             try:
@@ -366,10 +484,16 @@ async def orchestrate_search_stream(query: FlightQuery, session_id: Optional[str
                                 yield f"data: {token}\n\n"
 
                 yield "data: [DONE]\n\n"
+
             except Exception as e:
-                logger.exception("OpenAI stream failed: %s", e)
+                logger.exception("💥 OpenAI streaming failed: %s", e)
                 yield f"data: [ERROR] {str(e)}\n\n"
                 yield "data: [DONE]\n\n"
+
+        # Session persistence
+        if session_id:
+            append_message(session_id, "user", json.dumps(query.dict()))
+            append_message(session_id, "assistant", "[Streaming started]")
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -383,6 +507,7 @@ async def orchestrate_search_stream(query: FlightQuery, session_id: Optional[str
             code="STREAM_ERROR",
             status_code=500
         )
+
 
 
 
